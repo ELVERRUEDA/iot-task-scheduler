@@ -4,10 +4,7 @@
 #include <time.h>
 
 // CONFIGURA TUS CREDENCIALES
-const char* ssid = "ElverRB";
-const char* password = "Rapsoda25*";
-const char* firebase_project_id = "api-rest-fastapi-firebase";
-const char* authToken = "";
+#include "credentials.h"
 
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -18000;  // Colombia (UTC -5)
@@ -71,7 +68,22 @@ void setup() {
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi desconectado. Reconectando...");
+    WiFi.begin(ssid, password);
+    int intentos = 0;
+    while (WiFi.status() != WL_CONNECTED && intentos < 20) {
+      delay(500);
+      Serial.print(".");
+      intentos++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nReconectado al WiFi");
+    } else {
+      Serial.println("\nNo se pudo reconectar. Reintentando en 10 segundos.");
+      delay(10000);
+      return;
+    }
     HTTPClient http;
     String url = "https://firestore.googleapis.com/v1/projects/" + String(firebase_project_id) + "/databases/(default)/documents/tareas";
     http.begin(url);
@@ -84,7 +96,7 @@ void loop() {
 
     if (httpCode == 200) {
       String payload = http.getString(); 
-      DynamicJsonDocument doc(8192);
+      JsonDocument doc; (payload.length() * 2 + 256);
       deserializeJson(doc, payload);
 
       struct tm timeinfo;
