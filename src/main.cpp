@@ -1,14 +1,11 @@
-// Librerías necesarias
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <ESP32Servo.h>
 #include <time.h>
-#include <vector>
 
 // CONFIGURA TUS CREDENCIALES
-const char* ssid = "Red_IoT";
-const char* password = "Rapsoda25";
+const char* ssid = "ElverRB";
+const char* password = "Rapsoda25*";
 const char* firebase_project_id = "api-rest-fastapi-firebase";
 const char* authToken = "";
 
@@ -16,16 +13,37 @@ const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = -18000;  // Colombia (UTC -5)
 const int daylightOffset_sec = 0;
 
-Servo myServo;
-const int servoPin = 14;
+// Pines del motor L298N
+const int IN1 = 27;
+const int IN2 = 26;
+const int ENA = 25;  // Pin habilitado pero controlado por jumper
 
-// Bandera para evitar ejecuciones repetidas en el mismo minuto
-String ultimaHoraEjecutada = "";
-std::vector<String> tareasEjecutadas;
+String ultimaFechaHoraEjecutada = "";
 bool tareaEnEjecucion = false;
+
+void encenderMotor() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENA, HIGH);
+  Serial.println("Motor DC 12V encendido");
+}
+
+void detenerMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENA, LOW);
+  Serial.println("Motor DC 12V detenido");
+}
 
 void setup() {
   Serial.begin(115200);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENA, OUTPUT);
+
+  detenerMotor();
+
   WiFi.begin(ssid, password);
   Serial.print("Conectando a WiFi");
 
@@ -37,7 +55,6 @@ void setup() {
 
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 
-  // Espera a que se sincronice la hora (máx 10 intentos)
   struct tm timeinfo;
   int intentos = 0;
   while (!getLocalTime(&timeinfo) && intentos < 10) {
@@ -47,11 +64,10 @@ void setup() {
   }
 
   if (intentos == 10) {
-    Serial.println(" No se pudo obtener la hora. Continuando sin sincronización.");
+    Serial.println(" No se pudo obtener la hora.");
   } else {
     Serial.println(" Hora sincronizada correctamente.");
   }
-
 }
 
 void loop() {
@@ -71,58 +87,68 @@ void loop() {
       DynamicJsonDocument doc(8192);
       deserializeJson(doc, payload);
 
-      // Obtener hora actual
       struct tm timeinfo;
       if (!getLocalTime(&timeinfo)) {
         Serial.println("No se pudo obtener la hora");
         return;
       }
 
-      char currentTime[6];  // HH:mm
-      strftime(currentTime, sizeof(currentTime), "%H:%M", &timeinfo);
-      Serial.print("Hora actual: ");
-      Serial.println(currentTime);
+      // Obtener fecha y hora actual
+      char currentDateTime[17];
+      strftime(currentDateTime, sizeof(currentDateTime), "%Y-%m-%d %H:%M", &timeinfo);
+      Serial.print("Fecha y hora actual: ");
+      Serial.println(currentDateTime);
 
       bool tareaEjecutadaEnEsteCiclo = false;
 
-      // Revisamos todas las tareas
       for (JsonObject tarea : doc["documents"].as<JsonArray>()) {
         String tareaID = tarea["name"];
         tareaID = tareaID.substring(tareaID.lastIndexOf("/") + 1);
 
+        // Obtener fecha y hora de la tarea
+        String fecha = tarea["fields"]["fecha"]["stringValue"] | "";
         String hora = tarea["fields"]["hora"]["stringValue"] | "";
-        bool completada = tarea["fields"]["completada"]["booleanValue"] | false;
+        bool completada = tarea["fields"]["completado"]["booleanValue"] | 
+                  tarea["fields"]["completada"]["booleanValue"] | false;
 
-        // Verifica si la tarea debe ejecutarse
-        if (!completada && hora == String(currentTime)) {
-          if (!tareaEnEjecucion) {
-            Serial.println("Ejecutando tarea: " + tareaID);
+        // Combinar fecha y hora para comparación
+        String fechaHoraTarea = fecha + " " + hora;
+
+        Serial.println("Tarea ID: " + tareaID);
+        Serial.println("Fecha programada: " + fecha);
+        Serial.println("Hora programada: " + hora);
+        Serial.println("Completada: " + String(completada));
+
+        Serial.println("Comparando: [" + fechaHoraTarea + "] vs [" + String(currentDateTime) + "]");
+          if (!completada && fecha != "" && hora != "" && fechaHoraTarea == String(currentDateTime)) {
+            if (!tareaEnEjecucion) {
+            Serial.println("Ejecutando tarea programada: " + tareaID);
+            Serial.println("Fecha y hora de ejecución: " + fechaHoraTarea);
             tareaEnEjecucion = true;
             tareaEjecutadaEnEsteCiclo = true;
 
-            // Mueve el servo
-            myServo.attach(servoPin);  // Asegúrate de que está conectado
-            myServo.write(90);
-            delay(5000);               // Tiempo en esa posición
-            myServo.write(0);
-            delay(9000);                // Espera antes de apagarlo
-            myServo.detach();          // Apaga el servo
+            // Encender motor DC por 5 segundos (sin control PWM)
+            encenderMotor();
+            delay(5000);
+            detenerMotor();
+            delay(2000);
 
-            // PATCH a Firebase para marcar la tarea como completada
+            // Actualizar tarea como completada en Firestore
             HTTPClient patchHttp;
-            String patchUrl = "https://firestore.googleapis.com/v1/projects/" + String(firebase_project_id) + "/databases/(default)/documents/tareas/" + tareaID + "?updateMask.fieldPaths=completada";
-            patchHttp.begin(patchUrl);
+            String patchPayload = "{\"fields\": {\"completado\": {\"booleanValue\": true}}}";
+              String patchUrl = "https://firestore.googleapis.com/v1/projects/" + String(firebase_project_id) + "/databases/(default)/documents/tareas/" + tareaID + "?updateMask.fieldPaths=completado";
 
             if (String(authToken).length() > 0) {
               patchHttp.addHeader("Authorization", "Bearer " + String(authToken));
             }
             patchHttp.addHeader("Content-Type", "application/json");
 
-            String patchPayload = "{\"fields\": {\"completada\": {\"booleanValue\": true}}}";
+            patchHttp.begin(patchUrl);
             int patchCode = patchHttp.PATCH(patchPayload);
 
             if (patchCode == 200) {
               Serial.println("Tarea marcada como completada");
+              ultimaFechaHoraEjecutada = fechaHoraTarea;
             } else {
               Serial.println("Error al actualizar tarea");
               Serial.println(patchHttp.getString());
@@ -133,12 +159,12 @@ void loop() {
         }
       }
 
-      // Si no se ejecutó ninguna tarea, aseguramos que el servo no se active
       if (!tareaEjecutadaEnEsteCiclo && tareaEnEjecucion) {
         tareaEnEjecucion = false;
-        Serial.println("Sin tareas para ejecutar. Servo en reposo.");
+        Serial.println("Sin tareas para ejecutar. Motor apagado.");
+        detenerMotor();
       } else if (!tareaEjecutadaEnEsteCiclo) {
-        Serial.println("Sin tareas para ejecutar.");
+        Serial.println("Sin tareas programadas para esta fecha y hora.");
       }
 
     } else {
@@ -149,5 +175,5 @@ void loop() {
     http.end();
   }
 
-  delay(10000);  // Espera 1 minuto antes de revisar nuevamente
+  delay(10000); // Espera 10 segundos antes de verificar nuevamente
 }
