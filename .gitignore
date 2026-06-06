@@ -12,6 +12,6 @@ __pycache__/
 .hex
 .exe
 .log
-firebase_credentials.json
 .vscode/
 *.code-workspace
+credentials.h
